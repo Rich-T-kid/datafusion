@@ -57,12 +57,69 @@
 use arrow::datatypes::DataType;
 use datafusion_common::{Result, ScalarValue};
 use datafusion_common::{internal_err, tree_node::Transformed};
-use datafusion_expr::{BinaryExpr, lit};
+use datafusion_expr::{BinaryExpr, cast, lit};
 use datafusion_expr::{Cast, Expr, Operator, TryCast, simplify::SimplifyContext};
 use datafusion_expr_common::casts::{
     is_date_narrowing_cast, is_supported_type, is_timestamp_precision_narrowing_cast,
     try_cast_literal_to_type,
 };
+
+pub(super) fn unwrap_dictionary_cast_in_comparison(
+    info: &SimplifyContext,
+    left: &Expr,
+    op: Operator,
+    right: &Expr,
+) -> Option<Expr> {
+    if op != Operator::Eq {
+        return None;
+    }
+
+    if let Some((left, right)) = unwrap_dictionary_column(info, left, right) {
+        return Some(Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        }));
+    }
+    let (right, left) = unwrap_dictionary_column(info, right, left)?;
+    Some(Expr::BinaryExpr(BinaryExpr {
+        left: Box::new(left),
+        op,
+        right: Box::new(right),
+    }))
+}
+
+fn unwrap_dictionary_column(
+    info: &SimplifyContext,
+    dictionary: &Expr,
+    encoded: &Expr,
+) -> Option<(Expr, Expr)> {
+    if !matches!(dictionary, Expr::Column(_)) {
+        return None;
+    }
+    let Expr::Cast(Cast { expr, field }) = encoded else {
+        return None;
+    };
+    if !matches!(expr.as_ref(), Expr::Column(_)) {
+        return None;
+    }
+
+    let dictionary_type = info.get_data_type(dictionary).ok()?;
+    let DataType::Dictionary(_, value_type) = &dictionary_type else {
+        return None;
+    };
+    let value_expr_type = info.get_data_type(expr).ok()?;
+    if !dictionary_type.equals_datatype(field.data_type())
+        || !value_type.as_ref().equals_datatype(&value_expr_type)
+    {
+        return None;
+    }
+
+    Some((
+        cast(dictionary.clone(), value_expr_type),
+        expr.as_ref().clone(),
+    ))
+}
 
 pub(super) fn unwrap_cast_in_comparison_for_binary(
     info: &SimplifyContext,
@@ -377,6 +434,16 @@ mod tests {
         // arrow_cast('value', 'Dictionary<Int32, Utf8>') = cast(str1 as Dictionary<Int32, Utf8>) => Utf8('value1') = str1
         let expr_input = lit(dict.clone()).eq(cast(col("str1"), dict.data_type()));
         let expected = col("str1").eq(lit("value"));
+        assert_eq!(optimize_test(expr_input, &schema), expected);
+
+        // tag = cast(str1 as Dictionary<Int32, Utf8>) => cast(tag as Utf8) = str1
+        let expr_input = col("tag").eq(cast(col("str1"), dict.data_type()));
+        let expected = cast(col("tag"), DataType::Utf8).eq(col("str1"));
+        assert_eq!(optimize_test(expr_input, &schema), expected);
+
+        // Verify reversed argument order
+        let expr_input = cast(col("str1"), dict.data_type()).eq(col("tag"));
+        let expected = col("str1").eq(cast(col("tag"), DataType::Utf8));
         assert_eq!(optimize_test(expr_input, &schema), expected);
     }
 

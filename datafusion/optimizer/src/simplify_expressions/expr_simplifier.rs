@@ -63,7 +63,7 @@ use crate::simplify_expressions::regex::simplify_regex_expr;
 use crate::simplify_expressions::unwrap_cast::{
     is_cast_expr_and_support_unwrap_cast_in_comparison_for_binary,
     is_cast_expr_and_support_unwrap_cast_in_comparison_for_inlist,
-    unwrap_cast_in_comparison_for_binary,
+    unwrap_cast_in_comparison_for_binary, unwrap_dictionary_cast_in_comparison,
 };
 use crate::{
     analyzer::type_coercion::TypeCoercionRewriter,
@@ -867,6 +867,12 @@ impl TreeNodeRewriter for Simplifier<'_> {
         };
 
         let info = self.info;
+        if let Expr::BinaryExpr(BinaryExpr { left, op, right }) = &expr
+            && let Some(expr) =
+                unwrap_dictionary_cast_in_comparison(info, left, *op, right)
+        {
+            return Ok(Transformed::yes(expr));
+        }
         Ok(match expr {
             // `value op NULL` -> `NULL`
             // `NULL op value` -> `NULL`
