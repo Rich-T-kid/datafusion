@@ -1321,8 +1321,12 @@ fn string_selectivity(
             )
         };
 
+    let data_type = match schema.field(column.index()).data_type() {
+        DataType::Dictionary(_, value_type) => value_type.as_ref(),
+        data_type => data_type,
+    };
     if !matches!(
-        schema.field(column.index()).data_type(),
+        data_type,
         DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
     ) {
         return None;
@@ -4422,6 +4426,34 @@ mod tests {
         assert_eq!(
             string_selectivity(&predicate, &schema, &statistics, 0.2),
             None
+        );
+    }
+
+    #[test]
+    fn test_string_selectivity_dictionary() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "category",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        )]));
+        let predicate: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+            Arc::new(Column::new("category", 0)),
+            Operator::Eq,
+            lit("Sports"),
+        ));
+        let statistics = Statistics {
+            num_rows: Precision::Exact(18_000),
+            total_byte_size: Precision::Absent,
+            column_statistics: vec![ColumnStatistics {
+                null_count: Precision::Exact(0),
+                distinct_count: Precision::Exact(10),
+                ..Default::default()
+            }],
+        };
+
+        assert_eq!(
+            string_selectivity(&predicate, &schema, &statistics, 0.2),
+            Some(0.1)
         );
     }
 
