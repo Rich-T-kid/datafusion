@@ -544,6 +544,121 @@ fn hash_generic_byte_view_array<T: ByteViewType>(
     }
 }
 
+#[cfg(all(not(feature = "force_hash_collisions"), target_arch = "aarch64"))]
+#[inline(always)]
+fn scatter_non_null_dictionary_scalar<K: ArrowDictionaryKeyType>(
+    keys: &[K::Native],
+    dict_hashes: &[u64],
+    hashes: &mut [u64],
+) {
+    const LANES: usize = 8;
+    debug_assert_eq!(keys.len(), hashes.len());
+
+    let chunked_len = keys.len() / LANES * LANES;
+    for start in (0..chunked_len).step_by(LANES) {
+        // Gathering first lets the CPU overlap the independent dictionary accesses.
+        let gathered: [u64; LANES] = std::array::from_fn(|lane| {
+            // SAFETY: `start + lane` is within the chunked prefix, and every
+            // non-null dictionary key is in bounds for `dict_hashes`.
+            unsafe {
+                let key = keys.get_unchecked(start + lane);
+                *dict_hashes.get_unchecked(key.as_usize())
+            }
+        });
+        for lane in 0..LANES {
+            // SAFETY: `start + lane` is within the chunked prefix and `lane`
+            // is within the fixed-size `gathered` array.
+            let (hash, dict_hash) = unsafe {
+                (
+                    hashes.get_unchecked_mut(start + lane),
+                    *gathered.get_unchecked(lane),
+                )
+            };
+            *hash = combine_hashes(dict_hash, *hash);
+        }
+    }
+
+    for (hash, key) in hashes[chunked_len..].iter_mut().zip(&keys[chunked_len..]) {
+        // SAFETY: every non-null dictionary key is in bounds for `dict_hashes`.
+        let dict_hash = unsafe { *dict_hashes.get_unchecked(key.as_usize()) };
+        *hash = combine_hashes(dict_hash, *hash);
+    }
+}
+
+#[cfg(all(not(feature = "force_hash_collisions"), target_arch = "aarch64"))]
+#[inline(always)]
+fn scatter_non_null_dictionary<K: ArrowDictionaryKeyType>(
+    keys: &[K::Native],
+    dict_hashes: &[u64],
+    hashes: &mut [u64],
+) {
+    debug_assert_eq!(keys.len(), hashes.len());
+
+    if size_of::<K::Native>() == size_of::<u32>()
+        && std::arch::is_aarch64_feature_detected!("sve")
+    {
+        // SAFETY: four-byte Arrow dictionary keys have the same representation
+        // as `u32`, and every non-null key indexes `dict_hashes`.
+        unsafe {
+            scatter_non_null_dictionary_sve(
+                keys.as_ptr().cast::<u32>(),
+                dict_hashes.as_ptr(),
+                hashes.as_mut_ptr(),
+                keys.len(),
+            )
+        }
+        return;
+    }
+
+    scatter_non_null_dictionary_scalar::<K>(keys, dict_hashes, hashes);
+}
+
+#[cfg(all(not(feature = "force_hash_collisions"), target_arch = "aarch64"))]
+#[inline(never)]
+unsafe fn scatter_non_null_dictionary_sve(
+    keys: *const u32,
+    dict_hashes: *const u64,
+    hashes: *mut u64,
+    len: usize,
+) {
+    // SAFETY: the caller provides `len` readable keys and hashes, writable
+    // hashes, and valid dictionary indices. The predicate bounds every load
+    // and store, including the final partial vector.
+    unsafe {
+        std::arch::asm!(
+            ".arch_extension sve",
+            "mov {index}, xzr",
+            "mov {constant}, #23273",
+            "mov z3.d, #37",
+            "dup z4.d, {constant}",
+            "2:",
+            "whilelo p0.d, {index}, {len}",
+            "b.none 3f",
+            "ld1w {{ z0.d }}, p0/z, [{keys}, {index}, lsl #2]",
+            "ld1d {{ z1.d }}, p0/z, [{dict_hashes}, z0.d, lsl #3]",
+            "ld1d {{ z2.d }}, p0/z, [{hashes}, {index}, lsl #3]",
+            "mla z2.d, p0/m, z1.d, z3.d",
+            "add z2.d, p0/m, z2.d, z4.d",
+            "st1d {{ z2.d }}, p0, [{hashes}, {index}, lsl #3]",
+            "incd {index}",
+            "b 2b",
+            "3:",
+            keys = in(reg) keys,
+            dict_hashes = in(reg) dict_hashes,
+            hashes = in(reg) hashes,
+            len = in(reg) len,
+            index = out(reg) _,
+            constant = out(reg) _,
+            out("v0") _,
+            out("v1") _,
+            out("v2") _,
+            out("v3") _,
+            out("v4") _,
+            options(nostack)
+        );
+    }
+}
+
 /// Scatter precomputed dictionary value hashes to key positions.
 ///
 /// Uses const generics to eliminate runtime branching in the hot loop:
@@ -563,6 +678,16 @@ fn hash_dictionary_scatter<
     hashes_buffer: &mut [u64],
 ) {
     let dict_values = array.values();
+    #[cfg(target_arch = "aarch64")]
+    if !HAS_NULL_KEYS && !HAS_NULL_VALUES && MULTI_COL {
+        scatter_non_null_dictionary::<K>(
+            array.keys().values(),
+            dict_hashes,
+            hashes_buffer,
+        );
+        return;
+    }
+
     if HAS_NULL_KEYS {
         for (hash, key) in hashes_buffer.iter_mut().zip(array.keys().iter()) {
             if let Some(key) = key {
