@@ -201,6 +201,16 @@ url = "2.5.7"
 uuid = "1.23"
 zstd = { version = "0.14", default-features = false }
 
+[patch.crates-io]
+arrow-array = { git = "https://github.com/Rich-T-kid/arrow-rs.git", rev = "5ca7f527f24fb25dd4403b19bdc320662c626e59" }
+arrow-buffer = { git = "https://github.com/Rich-T-kid/arrow-rs.git", rev = "5ca7f527f24fb25dd4403b19bdc320662c626e59" }
+arrow-cmp = { git = "https://github.com/Rich-T-kid/arrow-rs.git", rev = "5ca7f527f24fb25dd4403b19bdc320662c626e59" }
+arrow-data = { git = "https://github.com/Rich-T-kid/arrow-rs.git", rev = "5ca7f527f24fb25dd4403b19bdc320662c626e59" }
+arrow-ord = { git = "https://github.com/Rich-T-kid/arrow-rs.git", rev = "5ca7f527f24fb25dd4403b19bdc320662c626e59" }
+arrow-schema = { git = "https://github.com/Rich-T-kid/arrow-rs.git", rev = "5ca7f527f24fb25dd4403b19bdc320662c626e59" }
+arrow-select = { git = "https://github.com/Rich-T-kid/arrow-rs.git", rev = "5ca7f527f24fb25dd4403b19bdc320662c626e59" }
+arrow-string = { git = "https://github.com/Rich-T-kid/arrow-rs.git", rev = "5ca7f527f24fb25dd4403b19bdc320662c626e59" }
+
 # Keep this list sorted alphabetically.
 # See https://github.com/apache/datafusion/issues/18467 for the ongoing effort of
 # picking useful non-default lints.
